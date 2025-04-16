@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import {
   createUserWithEmailAndPassword,
   GoogleAuthProvider,
-  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   onAuthStateChanged,
   signOut,
@@ -59,7 +60,9 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     if (error) {
-      let errorSlice = error.slice(0, 50);
+      // Convert error to string if it's not already
+      const errorMessage = typeof error === 'string' ? error : error.message || String(error);
+      let errorSlice = errorMessage.slice(0, 50);
       toast.error(errorSlice, toastObj);
       setError(null);
     }
@@ -72,8 +75,48 @@ export const AuthProvider = ({ children }) => {
   const LoginEmailRef = useRef();
   const LoginPasswordRef = useRef();
 
+  // Handle Google redirect result
   useEffect(() => {
-    onAuthStateChanged(auth, (user) => {
+    const handleRedirectResult = async () => {
+      if (loading) return;
+      
+      setLoading(true);
+      try {
+        const result = await getRedirectResult(auth);
+        if (result) {
+          const user = result.user;
+          
+          const q = query(
+            collection(db, "users"),
+            where("email", "==", user.email)
+          );
+          const querySnapshot = await getDocs(q);
+
+          if (querySnapshot.empty) {
+            await setDoc(doc(db, "users", user.uid), {
+              name: user.displayName,
+              email: user.email,
+              createdAt: serverTimestamp(),
+              UserId: user.uid,
+            });
+          }
+          
+          window.location.href = "/app";
+        }
+      } catch (error) {
+        console.error("Redirect error:", error);
+        setError(error.code || String(error));
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    handleRedirectResult();
+  }, []);
+
+  // Monitor auth state
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
         FetchingUser(false);
         setUser(user);
@@ -82,6 +125,8 @@ export const AuthProvider = ({ children }) => {
         setUser(null);
       }
     });
+    
+    return () => unsubscribe();
   }, []);
 
   const formValidation = (email, password, name = null) => {
@@ -130,25 +175,26 @@ export const AuthProvider = ({ children }) => {
     setError(null);
 
     if (!formValidation(email, password, name)) {
-      return;
+      return false;
     }
 
     setLoading(true);
     try {
-      await createUserWithEmailAndPassword(auth, email, password).then(
-        (userCredential) => {
-          const user = userCredential.user;
-          setDoc(doc(db, "users", user.uid), {
-            name,
-            email,
-            createdAt: serverTimestamp(),
-            UserId: user.uid,
-          });
-        }
-      );
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+      
+      await setDoc(doc(db, "users", user.uid), {
+        name,
+        email,
+        createdAt: serverTimestamp(),
+        UserId: user.uid,
+      });
+      
       navigate("/login");
+      return true;
     } catch (error) {
       handleAuthError(error.code);
+      return false;
     } finally {
       setLoading(false);
     }
@@ -158,28 +204,15 @@ export const AuthProvider = ({ children }) => {
     const provider = new GoogleAuthProvider();
     setError(null);
     setLoading(true);
+    
     try {
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
-
-      const q = query(
-        collection(db, "users"),
-        where("email", "==", user.email)
-      );
-      const querySnapshot = await getDocs(q);
-
-      if (querySnapshot.empty) {
-        await setDoc(doc(db, "users", user.uid), {
-          name: user.displayName,
-          email: user.email,
-          createdAt: serverTimestamp(),
-          UserId: user.uid,
-        });
-      }
-      navigate("/app");
+      // Use redirect method instead of popup
+      await signInWithRedirect(auth, provider);
+      // The page will redirect to Google, and then come back
+      // The result is handled in the useEffect with getRedirectResult
     } catch (error) {
-      setError(error.code);
-    } finally {
+      console.error("Google sign-in error:", error);
+      setError(error.code || String(error));
       setLoading(false);
     }
   };
@@ -187,7 +220,7 @@ export const AuthProvider = ({ children }) => {
   const signIn = async (email, password, navigate) => {
     setError(null);
     if (!formValidation(email, password)) {
-      return;
+      return false;
     }
 
     setLoading(true);
@@ -195,8 +228,10 @@ export const AuthProvider = ({ children }) => {
     try {
       await signInWithEmailAndPassword(auth, email, password);
       navigate("/app");
+      return true;
     } catch (error) {
       handleAuthError(error.code);
+      return false;
     } finally {
       setLoading(false);
     }
@@ -214,6 +249,7 @@ export const AuthProvider = ({ children }) => {
       signupPasswordRef.current.value = "";
       signupNameRef.current.value = "";
     }
+    return success;
   };
 
   const handleLoginSubmit = async (navigate) => {
@@ -226,15 +262,16 @@ export const AuthProvider = ({ children }) => {
       LoginEmailRef.current.value = "";
       LoginPasswordRef.current.value = "";
     }
+    return success;
   };
 
   const handleLogout = () => {
     signOut(auth)
       .then(() => {
-        toast.success("Signout Succesfully", toastObj);
+        toast.success("Signout Successfully", toastObj);
       })
       .catch((error) => {
-        setError(error.code);
+        setError(error.code || String(error));
       });
   };
 
